@@ -1,104 +1,152 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import ttk
 import win32gui
+import win32process
 
-
-class WindowTracker:
-    def __init__(self, target_hwnd):
-        self.target_hwnd = target_hwnd
-        self.running = True
-
-        # 创建透明覆盖窗口
+class WindowListApp:
+    def __init__(self):
         self.root = tk.Tk()
-        self.root.overrideredirect(True)  # 无边框
-        self.root.attributes('-topmost', True)  # 置顶
-        self.root.attributes('-transparentcolor', 'gray')  # 灰色变透明
-
-        # 画布
-        self.canvas = tk.Canvas(self.root, bg='gray', highlightthickness=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-
-        # 绘制初始图形（边框 + 标签）
-        self.draw_overlay()
-
-        # 绑定键盘退出（按 ESC 退出）
-        self.root.bind('<Escape>', lambda e: self.stop())
-
-        # 开始跟踪
-        self.update_position()
-
-        # 窗口关闭时停止
-        self.root.protocol("WM_DELETE_WINDOW", self.stop)
-
-    def draw_overlay(self):
-        """在画布上绘制覆盖图形（边框和文字）"""
-        # 先清除旧图形（如果有的话）
-        self.canvas.delete('all')
-        # 绘制一个虚线矩形边框（稍后会在更新中调整大小）
-        self.rect_id = self.canvas.create_rectangle(
-            0, 0, 100, 100, outline='red', width=3, dash=(5, 3)
+        self.root.title("窗口列表 - 右键复制单个信息")
+        self.root.geometry("800x1000")
+        self.root.resizable(False, False)
+        # ---------- 创建表格 ----------
+        self.tree = ttk.Treeview(
+            self.root,
+            columns=('句柄', '类名', 'PID', '标题'),
+            show='headings'
         )
-        self.label_id = self.canvas.create_text(
-            20, 20, text='跟踪中', fill='red', font=('Arial', 12, 'bold'), anchor='nw'
-        )
+        self.tree.heading('句柄', text='句柄 (十六进制)')
+        self.tree.heading('类名', text='类名')
+        self.tree.heading('PID', text='进程 ID')
+        self.tree.heading('标题', text='窗口标题')
 
-    def update_position(self):
-        """定时更新覆盖窗口的位置和大小"""
-        if not self.running:
-            return
+        self.tree.column('句柄', width=120, anchor='center')
+        self.tree.column('类名', width=180)
+        self.tree.column('PID', width=80, anchor='center')
+        self.tree.column('标题', width=300)
 
-        try:
-            # 获取目标窗口的矩形
-            left, top, right, bottom = win32gui.GetWindowRect(self.target_hwnd)
-            width = right - left
-            height = bottom - top
+        scrollbar = ttk.Scrollbar(self.root, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5,0), pady=5)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0,5), pady=5)
 
-            # 如果窗口尺寸为0，可能被最小化或关闭了
-            if width == 0 or height == 0:
-                # 隐藏覆盖窗口
-                self.root.withdraw()
-            else:
-                # 更新覆盖窗口的几何属性
-                self.root.geometry(f"{width}x{height}+{left}+{top}")
-                # 更新画布上的矩形尺寸（留边距）
-                padding = 5
-                self.canvas.coords(self.rect_id, padding, padding, width - padding, height - padding)
-                # 更新文字位置（保持在左上角）
-                self.canvas.coords(self.label_id, 20, 20)
-                # 确保窗口显示
-                self.root.deiconify()
+        # ---------- 底部按钮 ----------
+        btn_frame = tk.Frame(self.root)
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        except Exception as e:
-            # 如果句柄无效（窗口已关闭），停止跟踪
-            print("目标窗口已关闭，停止跟踪")
-            self.stop()
-            return
+        btn_frame2 = tk.Frame(self.root)
+        btn_frame2.pack(fill=tk.X, padx=5, pady=5)
 
-        # 每 50ms 检查一次
-        self.root.after(1, self.update_position)
+        refresh_btn = tk.Button(btn_frame, text=" 手动刷新", command=self.refresh_list)
+        refresh_btn.pack(side=tk.LEFT, padx=5)
 
-    def stop(self):
-        """停止跟踪并关闭窗口"""
-        self.running = False
-        self.root.destroy()
+        exit_btn = tk.Button(btn_frame2, text="✖ 退出", command=self.root.quit)
+        exit_btn.pack(side=tk.LEFT, padx=5)
+
+        # ---------- 底部状态栏 ----------
+        self.status_label = tk.Label(self.root, text="👉 右键点击任意行，可复制单个字段", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
+
+        # ---------- 创建右键菜单 ----------
+        self.popup_menu = tk.Menu(self.root, tearoff=0)
+        self.popup_menu.add_command(label="复制句柄", command=self.copy_hwnd)
+        self.popup_menu.add_command(label="复制类名", command=self.copy_class)
+        self.popup_menu.add_command(label="复制 PID", command=self.copy_pid)
+        self.popup_menu.add_command(label="复制标题", command=self.copy_title)
+        self.popup_menu.add_separator()
+        self.popup_menu.add_command(label="复制整行（全部）", command=self.copy_all)
+
+        # 绑定右键点击事件
+        self.tree.bind("<Button-3>", self.show_popup)
+
+        # 存储当前右键点击的行数据
+        self.current_values = None
+
+        # ---------- 初始化 ----------
+        self.refresh_list()
+        self.auto_refresh()
+
+    def get_windows(self):
+        """枚举所有可见窗口"""
+        windows = []
+        def callback(hwnd, extra):
+            if win32gui.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd)
+                if title:
+                    try:
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    except:
+                        pid = 'N/A'
+                    class_name = win32gui.GetClassName(hwnd)
+                    windows.append((hwnd, class_name, pid, title))
+            return True
+        win32gui.EnumWindows(callback, None)
+        return windows
+
+    def refresh_list(self):
+        """刷新表格"""
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+
+        windows = self.get_windows()
+        for hwnd, class_name, pid, title in windows:
+            hwnd_str = f"0x{hwnd:X}"
+            self.tree.insert('', 'end', values=(hwnd_str, class_name, pid, title))
+
+        self.root.title(f"窗口列表 (共 {len(windows)} 个窗口) - 右键复制单个字段")
+
+    def show_popup(self, event):
+        """显示右键菜单"""
+        item = self.tree.identify_row(event.y)
+        if item:
+            # 选中该行
+            self.tree.selection_set(item)
+            # 获取该行的数据
+            self.current_values = self.tree.item(item, 'values')
+            # 在鼠标位置弹出菜单
+            self.popup_menu.post(event.x_root, event.y_root)
+
+    # ---------- 复制单个字段的方法 ----------
+    def copy_hwnd(self):
+        if self.current_values:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.current_values[0])
+            self.status_label.config(text=f"✅ 已复制句柄: {self.current_values[0]}", fg='green')
+
+    def copy_class(self):
+        if self.current_values:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.current_values[1])
+            self.status_label.config(text=f"✅ 已复制类名: {self.current_values[1]}", fg='green')
+
+    def copy_pid(self):
+        if self.current_values:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.current_values[2])
+            self.status_label.config(text=f"✅ 已复制 PID: {self.current_values[2]}", fg='green')
+
+    def copy_title(self):
+        if self.current_values:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.current_values[3])
+            self.status_label.config(text=f"✅ 已复制标题: {self.current_values[3]}", fg='green')
+
+    def copy_all(self):
+        """额外加一个复制整行的功能，方便你对比"""
+        if self.current_values:
+            info = f"句柄: {self.current_values[0]}\n类名: {self.current_values[1]}\nPID: {self.current_values[2]}\n标题: {self.current_values[3]}"
+            self.root.clipboard_clear()
+            self.root.clipboard_append(info)
+            self.status_label.config(text=f"✅ 已复制整行信息", fg='green')
+
+    def auto_refresh(self):
+        self.refresh_list()
+        self.root.after(3000, self.auto_refresh)
 
     def run(self):
-        """启动主循环"""
         self.root.mainloop()
 
 
-# --- 使用示例 ---
 if __name__ == "__main__":
-    # 查找目标窗口（例如记事本）
-    hwnd = win32gui.FindWindow(None, "新建文本文档 (2) - 记事本)
-    if hwnd == 0:
-        # 尝试用类名查找
-        hwnd = win32gui.FindWindow("Notepad", None)
-
-    if hwnd == 0:
-        print("未找到目标窗口，请检查标题或类名")
-        exit()
-
-    # 启动跟踪器
-    tracker = WindowTracker(hwnd)
-    tracker.run()
+    app = WindowListApp()
+    app.run()
